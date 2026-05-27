@@ -1,5 +1,8 @@
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
+
 const {
   Client,
   GatewayIntentBits,
@@ -14,6 +17,80 @@ const {
   AttachmentBuilder,
 } = require("discord.js");
 
+// =========================
+// CONFIG
+// =========================
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+
+// Coloque no .env ou deixe esse ID fixo
+const CATEGORIA_WHITELIST =
+  process.env.CATEGORIA_WHITELIST_ID || "1507828200896729139";
+
+// IMPORTANTE:
+// Se os dois bots estiverem em pastas diferentes, use no .env dos DOIS bots:
+// TICKETS_DB_PATH=/caminho/completo/tickets.json
+const TICKETS_DB_PATH =
+  process.env.TICKETS_DB_PATH || path.join(__dirname, "tickets.json");
+
+// =========================
+// BANCO JSON
+// =========================
+function garantirBanco() {
+  if (!fs.existsSync(TICKETS_DB_PATH)) {
+    fs.writeFileSync(TICKETS_DB_PATH, JSON.stringify({}, null, 2));
+  }
+}
+
+function lerBanco() {
+  garantirBanco();
+
+  try {
+    return JSON.parse(fs.readFileSync(TICKETS_DB_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function salvarBanco(data) {
+  fs.writeFileSync(TICKETS_DB_PATH, JSON.stringify(data, null, 2));
+}
+
+function salvarTicket(userId, info) {
+  const banco = lerBanco();
+
+  banco[userId] = {
+    userId,
+    channelId: info.channelId,
+    messageId: info.messageId,
+    guildId: info.guildId,
+    channelName: info.channelName,
+    createdAt: new Date().toISOString(),
+    status: "aberto",
+  };
+
+  salvarBanco(banco);
+}
+
+function marcarTicketFechado(channelId) {
+  const banco = lerBanco();
+
+  for (const userId of Object.keys(banco)) {
+    if (banco[userId].channelId === channelId) {
+      banco[userId].status = "fechado";
+      banco[userId].closedAt = new Date().toISOString();
+    }
+  }
+
+  salvarBanco(banco);
+}
+
+// =========================
+// CLIENT
+// =========================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -60,7 +137,7 @@ async function criarTranscript(channel) {
     </style>
   </head>
   <body>
-    <h1>Transcript - ${channel.name}</h1>
+    <h1>Transcript - ${escapeHTML(channel.name)}</h1>
   `;
 
   for (const msg of messages) {
@@ -79,10 +156,11 @@ async function criarTranscript(channel) {
 }
 
 client.once("ready", () => {
-  console.log(`Bot online como ${client.user.tag}`);
+  garantirBanco();
+  console.log(`Bot de ticket online como ${client.user.tag}`);
 });
 
-client.on("interactionCreate", async interaction => {
+client.on("interactionCreate", async (interaction) => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "ticket") {
       const row = new ActionRowBuilder().addComponents(
@@ -99,83 +177,115 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
-  if (interaction.isButton()) {
-    if (interaction.customId === "abrir_ticket") {
-      const channel = await interaction.guild.channels.create({
-        name: `ticket-${interaction.user.username}`,
-        type: ChannelType.GuildText,
-        permissionOverwrites: [
-          {
-            id: interaction.guild.id,
-            deny: [PermissionsBitField.Flags.ViewChannel],
-          },
-          {
-            id: interaction.user.id,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
-            ],
-          },
-        ],
-      });
+  if (!interaction.isButton()) return;
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("fechar_ticket")
-          .setLabel("Fechar Ticket")
-          .setStyle(ButtonStyle.Danger)
-      );
+  if (interaction.customId === "abrir_ticket") {
+    const existente = Object.values(lerBanco()).find(
+      (t) =>
+        t.userId === interaction.user.id &&
+        t.guildId === interaction.guild.id &&
+        t.status === "aberto"
+    );
 
-      await channel.send({
-        content: `Olá ${interaction.user}, explique seu problema aqui.`,
-        components: [row],
-      });
-
-      await interaction.reply({
-        content: `Ticket criado: ${channel}`,
+    if (existente) {
+      return interaction.reply({
+        content: `Você já tem um ticket aberto: <#${existente.channelId}>`,
         ephemeral: true,
       });
     }
 
-    if (interaction.customId === "fechar_ticket") {
-      await interaction.reply("Gerando transcript...");
+    const channel = await interaction.guild.channels.create({
+      name: `wl-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
+      type: ChannelType.GuildText,
+      parent: CATEGORIA_WHITELIST,
+      permissionOverwrites: [
+        {
+          id: interaction.guild.id,
+          deny: [PermissionsBitField.Flags.ViewChannel],
+        },
+        {
+          id: interaction.user.id,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        },
+      ],
+    });
 
-      const transcript = await criarTranscript(interaction.channel);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("fechar_ticket")
+        .setLabel("Fechar Ticket")
+        .setStyle(ButtonStyle.Danger)
+    );
 
-      const file = new AttachmentBuilder(transcript, {
-        name: `${interaction.channel.name}.html`,
+    const ticketMessage = await channel.send({
+      content: `Olá ${interaction.user}, explique seu problema aqui ou inicie a whitelist no botão que aparecer abaixo.`,
+      components: [row],
+    });
+
+    salvarTicket(interaction.user.id, {
+      guildId: interaction.guild.id,
+      channelId: channel.id,
+      channelName: channel.name,
+      messageId: ticketMessage.id,
+    });
+
+    await interaction.reply({
+      content:
+        `Ticket criado: ${channel}\n` +
+        `ID da mensagem do ticket: \`${ticketMessage.id}\``,
+      ephemeral: true,
+    });
+  }
+
+  if (interaction.customId === "fechar_ticket") {
+    await interaction.reply("Gerando transcript...");
+
+    const transcript = await criarTranscript(interaction.channel);
+
+    const file = new AttachmentBuilder(transcript, {
+      name: `${interaction.channel.name}.html`,
+    });
+
+    const logChannel = interaction.guild.channels.cache.get(LOG_CHANNEL_ID);
+
+    if (logChannel) {
+      await logChannel.send({
+        content: `Transcript do ticket **${interaction.channel.name}**`,
+        files: [file],
       });
-
-      const logChannel = interaction.guild.channels.cache.get(
-        process.env.LOG_CHANNEL_ID
-      );
-
-      if (logChannel) {
-        await logChannel.send({
-          content: `Transcript do ticket **${interaction.channel.name}**`,
-          files: [file],
-        });
-      }
-
-      await interaction.channel.delete().catch(() => {});
     }
+
+    marcarTicketFechado(interaction.channel.id);
+
+    await interaction.channel.delete().catch(() => {});
   }
 });
 
+// =========================
+// SLASH COMMANDS
+// =========================
 const commands = [
   new SlashCommandBuilder()
     .setName("ticket")
     .setDescription("Envia o painel de tickets"),
-].map(cmd => cmd.toJSON());
+].map((cmd) => cmd.toJSON());
 
-const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 (async () => {
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: commands }
-  );
+  try {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+      body: commands,
+    });
+
+    console.log("Comando /ticket registrado.");
+  } catch (err) {
+    console.error("Erro ao registrar comandos:", err);
+  }
 })();
 
-client.login(process.env.TOKEN);
+client.login(TOKEN);
