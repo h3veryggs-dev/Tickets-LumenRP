@@ -14,7 +14,6 @@ const {
   ButtonStyle,
   ChannelType,
   PermissionsBitField,
-  AttachmentBuilder,
 } = require("discord.js");
 
 // =========================
@@ -25,6 +24,10 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+
+const WORKER_URL =
+  process.env.WORKER_URL ||
+  "https://transcripts-whitelist.henrique-brantmourao.workers.dev";
 
 // Coloque no .env ou deixe esse ID fixo
 const CATEGORIA_WHITELIST =
@@ -152,7 +155,7 @@ async function criarTranscript(channel) {
 
   html += `</body></html>`;
 
-  return Buffer.from(html, "utf-8");
+  return html;
 }
 
 client.once("ready", () => {
@@ -244,24 +247,53 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.customId === "fechar_ticket") {
     await interaction.reply("Gerando transcript...");
 
-    const transcript = await criarTranscript(interaction.channel);
+    try {
+      const html = await criarTranscript(interaction.channel);
 
-    const file = new AttachmentBuilder(transcript, {
-      name: `${interaction.channel.name}.html`,
-    });
-
-    const logChannel = interaction.guild.channels.cache.get(LOG_CHANNEL_ID);
-
-    if (logChannel) {
-      await logChannel.send({
-        content: `Transcript do ticket **${interaction.channel.name}**`,
-        files: [file],
+      const resposta = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ html }),
       });
+
+      if (!resposta.ok) {
+        throw new Error(`Worker respondeu com status ${resposta.status}`);
+      }
+
+      const data = await resposta.json();
+      const link = data.url;
+
+      if (!link) {
+        throw new Error("O Worker não retornou o campo url.");
+      }
+
+      const logChannel = interaction.guild.channels.cache.get(LOG_CHANNEL_ID);
+
+      if (logChannel) {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel("🌐 Ver Transcript")
+            .setStyle(ButtonStyle.Link)
+            .setURL(link)
+        );
+
+        await logChannel.send({
+          content: `📄 Transcript do ticket **${interaction.channel.name}**`,
+          components: [row],
+        });
+      }
+
+      marcarTicketFechado(interaction.channel.id);
+      await interaction.channel.delete().catch(() => {});
+    } catch (err) {
+      console.error("Erro ao enviar transcript para o Worker:", err);
+      await interaction.followUp({
+        content: "Erro ao gerar/enviar o transcript. Veja o console do bot.",
+        ephemeral: true,
+      }).catch(() => {});
     }
-
-    marcarTicketFechado(interaction.channel.id);
-
-    await interaction.channel.delete().catch(() => {});
   }
 });
 
