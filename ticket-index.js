@@ -14,7 +14,7 @@ const {
   ButtonStyle,
   ChannelType,
   PermissionsBitField,
-  AttachmentBuilder,
+  EmbedBuilder,
 } = require("discord.js");
 
 // =========================
@@ -25,6 +25,10 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+
+const WORKER_URL =
+  process.env.WORKER_URL ||
+  "https://transcripts-whitelist.henrique-brantmourao.workers.dev";
 
 // Coloque no .env ou deixe esse ID fixo
 const CATEGORIA_WHITELIST =
@@ -152,10 +156,10 @@ async function criarTranscript(channel) {
 
   html += `</body></html>`;
 
-  return Buffer.from(html, "utf-8");
+  return html;
 }
 
-client.once("ready", () => {
+client.once("clientReady", () => {
   garantirBanco();
   console.log(`Bot de ticket online como ${client.user.tag}`);
 });
@@ -163,23 +167,89 @@ client.once("ready", () => {
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "ticket") {
-      const row = new ActionRowBuilder().addComponents(
+      const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId("abrir_ticket")
-          .setLabel("Abrir Ticket")
-          .setStyle(ButtonStyle.Primary)
+          .setCustomId("abrir_ticket_suporte")
+          .setLabel("Suporte")
+          .setEmoji("🛠️")
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId("abrir_ticket_denuncia_staff")
+          .setLabel("Denunciar Staff")
+          .setEmoji("🛡️")
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId("abrir_ticket_denuncia_player")
+          .setLabel("Denunciar Player")
+          .setEmoji("🚨")
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId("abrir_ticket_vip")
+          .setLabel("Ticket VIP")
+          .setEmoji("💎")
+          .setStyle(ButtonStyle.Success)
       );
 
+      const embedPainel = new EmbedBuilder()
+        .setColor("#5865F2")
+        .setTitle("🎫 Central de Atendimento — Lúmen RP")
+        .setDescription(
+          "Escolha abaixo o tipo de ticket que deseja abrir.\n\n" +
+          "🛠️ **Suporte** — dúvidas, bugs e ajuda geral.\n" +
+          "🛡️ **Denunciar Staff** — denúncias contra membros da equipe.\n" +
+          "🚨 **Denunciar Player** — denúncias contra jogadores.\n" +
+          "💎 **Ticket VIP** — compras, benefícios e suporte VIP."
+        )
+        .setFooter({ text: "Abra apenas um ticket por vez." })
+        .setTimestamp();
+
       await interaction.reply({
-        content: "Clique no botão abaixo para abrir um ticket.",
-        components: [row],
+        embeds: [embedPainel],
+        components: [row1],
       });
     }
   }
 
   if (!interaction.isButton()) return;
 
-  if (interaction.customId === "abrir_ticket") {
+  if (interaction.customId.startsWith("abrir_ticket_")) {
+    await interaction.deferReply({ ephemeral: true });
+
+    const tiposTicket = {
+      abrir_ticket_suporte: {
+        nome: "suporte",
+        titulo: "🛠️ Suporte",
+        descricao: "Explique sua dúvida, bug ou problema com o máximo de detalhes possível.",
+        emoji: "🛠️",
+      },
+      abrir_ticket_denuncia_staff: {
+        nome: "denuncia-staff",
+        titulo: "🛡️ Denúncia contra Staff",
+        descricao: "Descreva o ocorrido, informe o staff envolvido e envie provas, prints ou vídeos.",
+        emoji: "🛡️",
+      },
+      abrir_ticket_denuncia_player: {
+        nome: "denuncia-player",
+        titulo: "🚨 Denúncia contra Player",
+        descricao: "Informe o jogador denunciado, o motivo e envie provas, prints ou vídeos.",
+        emoji: "🚨",
+      },
+      abrir_ticket_vip: {
+        nome: "vip",
+        titulo: "💎 Ticket VIP",
+        descricao: "Use este ticket para compras, benefícios, dúvidas ou problemas relacionados ao VIP.",
+        emoji: "💎",
+      },
+    };
+
+    const tipoTicket = tiposTicket[interaction.customId];
+
+    if (!tipoTicket) {
+      return interaction.editReply({
+        content: "Tipo de ticket inválido.",
+      });
+    }
+
     const existente = Object.values(lerBanco()).find(
       (t) =>
         t.userId === interaction.user.id &&
@@ -188,14 +258,13 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     if (existente) {
-      return interaction.reply({
+      return interaction.editReply({
         content: `Você já tem um ticket aberto: <#${existente.channelId}>`,
-        ephemeral: true,
       });
     }
 
     const channel = await interaction.guild.channels.create({
-      name: `wl-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
+      name: `${tipoTicket.nome}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, ""),
       type: ChannelType.GuildText,
       parent: CATEGORIA_WHITELIST,
       permissionOverwrites: [
@@ -221,8 +290,24 @@ client.on("interactionCreate", async (interaction) => {
         .setStyle(ButtonStyle.Danger)
     );
 
+    const embedTicket = new EmbedBuilder()
+      .setColor("#2F80ED")
+      .setTitle(`${tipoTicket.titulo}`)
+      .setDescription(
+        `Olá ${interaction.user}!\n\n` +
+        `${tipoTicket.descricao}\n\n` +
+        "Quando terminar, aguarde a equipe responder. Para fechar, use o botão abaixo."
+      )
+      .addFields(
+        { name: "👤 Usuário", value: `${interaction.user}`, inline: true },
+        { name: "🆔 ID", value: `\`${interaction.user.id}\``, inline: true },
+        { name: "📌 Tipo", value: `${tipoTicket.titulo}`, inline: true }
+      )
+      .setTimestamp();
+
     const ticketMessage = await channel.send({
-      content: `Olá ${interaction.user}, explique seu problema aqui ou inicie a whitelist no botão que aparecer abaixo.`,
+      content: `${interaction.user}`,
+      embeds: [embedTicket],
       components: [row],
     });
 
@@ -231,37 +316,66 @@ client.on("interactionCreate", async (interaction) => {
       channelId: channel.id,
       channelName: channel.name,
       messageId: ticketMessage.id,
+      tipo: tipoTicket.nome,
     });
 
-    await interaction.reply({
+    await interaction.editReply({
       content:
-        `Ticket criado: ${channel}\n` +
+        `${tipoTicket.emoji} Ticket criado: ${channel}\n` +
         `ID da mensagem do ticket: \`${ticketMessage.id}\``,
-      ephemeral: true,
     });
   }
 
   if (interaction.customId === "fechar_ticket") {
     await interaction.reply("Gerando transcript...");
 
-    const transcript = await criarTranscript(interaction.channel);
+    try {
+      const html = await criarTranscript(interaction.channel);
 
-    const file = new AttachmentBuilder(transcript, {
-      name: `${interaction.channel.name}.html`,
-    });
-
-    const logChannel = interaction.guild.channels.cache.get(LOG_CHANNEL_ID);
-
-    if (logChannel) {
-      await logChannel.send({
-        content: `Transcript do ticket **${interaction.channel.name}**`,
-        files: [file],
+      const resposta = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ html }),
       });
+
+      if (!resposta.ok) {
+        throw new Error(`Worker respondeu com status ${resposta.status}`);
+      }
+
+      const data = await resposta.json();
+      const link = data.url;
+
+      if (!link) {
+        throw new Error("O Worker não retornou o campo url.");
+      }
+
+      const logChannel = interaction.guild.channels.cache.get(LOG_CHANNEL_ID);
+
+      if (logChannel) {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel("🌐 Ver Transcript")
+            .setStyle(ButtonStyle.Link)
+            .setURL(link)
+        );
+
+        await logChannel.send({
+          content: `📄 Transcript do ticket **${interaction.channel.name}**`,
+          components: [row],
+        });
+      }
+
+      marcarTicketFechado(interaction.channel.id);
+      await interaction.channel.delete().catch(() => {});
+    } catch (err) {
+      console.error("Erro ao enviar transcript para o Worker:", err);
+      await interaction.followUp({
+        content: "Erro ao gerar/enviar o transcript. Veja o console do bot.",
+        ephemeral: true,
+      }).catch(() => {});
     }
-
-    marcarTicketFechado(interaction.channel.id);
-
-    await interaction.channel.delete().catch(() => {});
   }
 });
 
